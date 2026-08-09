@@ -17,9 +17,23 @@ st.set_page_config(
 st.title("⚖️ Analista Jurídico (v2.1) — Filtro de Impedimentos")
 st.caption("Arquitetura Determinística Anti-Alucinação (SEEU & BNMP 3.0)")
 
+# ------------------------------------------------------------------------------
+# GERENCIAMENTO SEGURO DA API KEY (SECRETS OU SIDEBAR)
+# ------------------------------------------------------------------------------
+api_key = None
+
+# 1. Tenta carregar dos Secrets do Streamlit Cloud
+if "GEMINI_API_KEY" in st.secrets:
+    api_key = st.secrets["GEMINI_API_KEY"]
+
 with st.sidebar:
-    st.header("Configuração")
-    api_key = st.text_input("Gemini API Key", type="password")
+    st.header("Status do Sistema")
+    if api_key:
+        st.success("🔑 API Key do Gemini carregada dos Secrets!")
+    else:
+        st.warning("⚠️ API Key não encontrada nos Secrets.")
+        api_key = st.text_input("Informe a Gemini API Key manualmente:", type="password")
+    
     st.markdown("---")
     st.info(
         "A IA realiza unicamente a leitura e extração dos dados estruturados. "
@@ -27,7 +41,7 @@ with st.sidebar:
     )
 
 # ------------------------------------------------------------------------------
-# SCHEMAS DE EXTRAÇÃO ESTRUTURADA
+# SCHEMAS DE EXTRAÇÃO ESTRUTURADA (PROIBIÇÃO DE ALUCINAÇÃO)
 # ------------------------------------------------------------------------------
 class PecaBNMP(BaseModel):
     nup: str = Field(
@@ -191,7 +205,7 @@ with col2:
 
 if st.button("Executar Análise Lógica v2.1", type="primary", use_container_width=True):
     if not api_key:
-        st.error("Insira a chave da API do Gemini na barra lateral.")
+        st.error("Chave da API do Gemini não configurada. Configure no Secrets do Streamlit ou informe na barra lateral.")
     elif not txt_seeu or not txt_bnmp:
         st.warning("Preencha ambos os campos de texto antes de analisar.")
     else:
