@@ -1,6 +1,7 @@
 import datetime
 import json
 import time
+import pypdf
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -17,7 +18,7 @@ st.set_page_config(
 
 st.title("⚖️ Analista Jurídico (v2.1) — Filtro de Impedimentos")
 st.caption(
-    "Arquitetura Determinística Anti-Alucinação com Upload de PDF (SEEU & BNMP 3.0)"
+    "Arquitetura Determinística Anti-Alucinação com Leitura Nativa de PDF (SEEU & BNMP 3.0)"
 )
 
 # ------------------------------------------------------------------------------
@@ -40,8 +41,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.info(
-        "A IA realiza unicamente a leitura OCR do PDF e extração dos dados estruturados em JSON. "
-        "Toda a lógica de bloqueio de falsos positivos roda no backend Python."
+        "O texto dos PDFs é extraído localmente e enviado para o Gemini apenas para "
+        "estruturação de dados em JSON. A análise do Cenário A/B roda em Python."
     )
 
 
@@ -74,27 +75,43 @@ class ExtracaoProcessual(BaseModel):
 
 
 # ------------------------------------------------------------------------------
-# EXTRAÇÃO VIA GEMINI API (MODELO GEMINI-1.5-FLASH + FALLBACK AUTOMÁTICO)
+# EXTRAÇÃO DE TEXTO DOS PDFS (LOCAL E RÁPIDA VIA PYPDF)
 # ------------------------------------------------------------------------------
-def extrair_dados_pdf(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
+def extrair_texto_pdf(file_bytes):
+    reader = pypdf.PdfReader(file_bytes)
+    texto = ""
+    for page in reader.pages:
+        t = page.extract_text()
+        if t:
+            texto += t + "\n"
+    return texto
+
+
+# ------------------------------------------------------------------------------
+# EXTRAÇÃO VIA GEMINI API (MODELO OFICIAL COM FALLBACK E ESTRUTURAÇÃO ENFORCADA)
+# ------------------------------------------------------------------------------
+def extrair_dados_com_gemini(texto_seeu, texto_bnmp, api_key_val):
     client = genai.Client(api_key=api_key_val)
 
-    prompt = """
-    Sua única função é ler os dois documentos PDF anexados (Relatório do SEEU e Extrato do BNMP 3.0) 
+    prompt = f"""
+    Sua única função é ler os textos extraídos dos documentos (Relatório do SEEU e Extrato do BNMP 3.0) 
     e extrair os dados processuais solicitados, preenchendo o esquema JSON estrito fornecido.
     
     Instruções de Extração:
-    1. Identifique o NUP principal da execução e todos os NUPs dos processos de conhecimento do SEEU.
+    1. Identifique o NUP principal da execução e todos os NUPs dos processos de conhecimento/origem do SEEU.
     2. Identifique todas as peças do BNMP com seus respectivos NUPs, Nomes de Peça, Status e Datas de Emissão.
-    3. Não deduza, não infira e não crie dados que não estejam visíveis nos PDFs.
+    3. Não deduza, não infira e não crie dados que não estejam visíveis no texto.
+    
+    TEXTO RELATÓRIO SEEU:
+    ---
+    {texto_seeu}
+    ---
+    
+    TEXTO EXTRATO BNMP 3.0:
+    ---
+    {texto_bnmp}
+    ---
     """
-
-    part_seeu = types.Part.from_bytes(
-        data=pdf_seeu_bytes, mime_type="application/pdf"
-    )
-    part_bnmp = types.Part.from_bytes(
-        data=pdf_bnmp_bytes, mime_type="application/pdf"
-    )
 
     configuracao = types.GenerateContentConfig(
         temperature=0.0,
@@ -102,27 +119,26 @@ def extrair_dados_pdf(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
         response_schema=ExtracaoProcessual,
     )
 
-    # Utiliza o gemini-1.5-flash como modelo principal (cota gratuita estável)
-    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
+    # Nomes oficiais suportados pelo SDK novo google-genai
+    modelos = ["gemini-2.0-flash", "gemini-2.5-flash"]
 
     for modelo in modelos:
         try:
             response = client.models.generate_content(
                 model=modelo,
-                contents=[part_seeu, part_bnmp, prompt],
+                contents=prompt,
                 config=configuracao,
             )
             return json.loads(response.text)
         except Exception as e:
             erro_str = str(e)
-            if "429" in erro_str or "RESOURCE_EXHAUSTED" in erro_str:
+            if "429" in erro_str or "404" in erro_str or "RESOURCE_EXHAUSTED" in erro_str:
                 if modelo != modelos[-1]:
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
                 else:
                     raise Exception(
-                        "⚠️ Limite temporário da API gratuita atingido. "
-                        "Aguarde cerca de 30 a 50 segundos e clique em Executar novamente."
+                        f"Erro na comunicação com a API do Gemini: {erro_str}"
                     )
             else:
                 raise e
@@ -257,19 +273,22 @@ if st.button("Executar Análise Lógica v2.1", type="primary", use_container_wid
             "Envie ambos os arquivos PDF (SEEU e BNMP) para iniciar a análise."
         )
     else:
-        with st.spinner("Analisando PDFs com Gemini e aplicando Regras v2.1..."):
+        with st.spinner("Processando PDFs e realizando análise lógica v2.1..."):
             try:
-                seeu_bytes = file_seeu.read()
-                bnmp_bytes = file_bnmp.read()
+                # 1. Extração local de texto via Python
+                texto_seeu = extrair_texto_pdf(file_seeu)
+                texto_bnmp = extrair_texto_pdf(file_bnmp)
 
-                # Extração via IA
-                dados_json = extrair_dados_pdf(seeu_bytes, bnmp_bytes, api_key)
+                # 2. IA extrai os dados estruturados em JSON
+                dados_json = extrair_dados_com_gemini(
+                    texto_seeu, texto_bnmp, api_key
+                )
 
                 # Auditoria visual
                 with st.expander("🛠️ Ver Dados Estruturados (Auditoria de Extração)"):
                     st.json(dados_json)
 
-                # Validação lógica via Python
+                # 3. Validação lógica determinística em Python
                 cenario, texto_final = aplicar_regras_v2_1(dados_json)
 
                 st.markdown("---")
