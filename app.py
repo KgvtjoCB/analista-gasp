@@ -1,6 +1,6 @@
 import datetime
 import re
-import pypdf
+import pdfplumber
 import streamlit as st
 
 # ------------------------------------------------------------------------------
@@ -18,88 +18,120 @@ st.caption("Motor Lógico Determinístico Anti-Alucinação (SEEU & BNMP 3.0)")
 # ------------------------------------------------------------------------------
 # REGEX DE NUP E DATA
 # ------------------------------------------------------------------------------
-REGREX_NUP = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b")
-REGREX_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+REGREX_NUP = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
+REGREX_DATA = re.compile(r"\d{2}/\d{2}/\d{4}")
 
 # ------------------------------------------------------------------------------
-# EXTRAÇÃO E HIGIENIZAÇÃO DE TEXTO DO PDF (SOLUÇÃO DE QUEBRA DE LINHA NO BNMP)
+# PARSER DE PDFS VIA PDFPLUMBER (LEITURA ESTRUTURADA DE TABELAS)
 # ------------------------------------------------------------------------------
-def extrair_texto_pdf(file_bytes):
-    reader = pypdf.PdfReader(file_bytes)
+def extrair_texto_seeu(file_bytes):
+    """Extrai todo o texto e NUPs do relatório do SEEU."""
     texto = ""
-    for page in reader.pages:
-        t = page.extract_text()
-        if t:
-            texto += t + "\n"
-
-    # CORREÇÃO CRÍTICA: Une NUPs quebrados por hífens/pontos entre linhas na tabela do BNMP
-    texto = re.sub(r"(\d{7}-)\n\s*(\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})", r"\1\2", texto)
-    texto = re.sub(r"(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\.)\n\s*", r"\1", texto)
-    texto = re.sub(r"(\d{7}-\d{2}\.\d{4}\.\d\.)\n\s*(\d{2}\.\d{4})", r"\1\2", texto)
-    
-    return texto
-
-def extrair_nups(texto):
-    """Extrai todos os NUPs únicos no padrão CNJ mantendo a pontuação."""
+    with pdfplumber.open(file_bytes) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                texto += t + "\n"
     return list(set(REGREX_NUP.findall(texto)))
 
-def extrair_pecas_bnmp(texto_bnmp):
+def extrair_pecas_bnmp(file_bytes):
     """
-    Varre o texto do BNMP 3.0 em blocos estruturados e identifica Mandados de Prisão, 
-    Alvarás de Soltura e Contramandados.
+    Varre as tabelas e linhas do BNMP 3.0 extraindo NUP, Tipo de Peça, Data e Status.
     """
-    linhas = texto_bnmp.split("\n")
     pecas = []
+    with pdfplumber.open(file_bytes) as pdf:
+        for page in pdf.pages:
+            # Tenta extrair a tabela da página
+            tabelas = page.extract_tables()
+            for tabela in tabelas:
+                for linha in tabela:
+                    # Junta todas as células da linha em um texto limpo
+                    linha_texto = " ".join([str(c) for c in linha if c is not None])
+                    linha_limpa = re.sub(r"\s+", " ", linha_texto)
+                    
+                    nup_match = REGREX_NUP.search(linha_limpa)
+                    data_match = REGREX_DATA.search(linha_limpa)
+                    
+                    if nup_match:
+                        nup = nup_match.group(0)
+                        data_str = data_match.group(0) if data_match else "01/01/1900"
+                        
+                        linha_lower = linha_limpa.lower()
+                        nome_peca = None
+                        if "mandado de prisão" in linha_lower or "mandado de prisao" in linha_lower:
+                            nome_peca = "Mandado de Prisão"
+                        elif "alvará" in linha_lower or "alvara" in linha_lower:
+                            nome_peca = "Alvará de Soltura"
+                        elif "contramandado" in linha_lower:
+                            nome_peca = "Contramandado de Prisão"
+                        
+                        if nome_peca:
+                            status = "Desconhecido"
+                            if "cumprido" in linha_lower:
+                                status = "Cumprido"
+                            elif "pendente" in linha_lower:
+                                status = "Pendente de Cumprimento"
+                            elif "baixado" in linha_lower:
+                                status = "Baixado"
+                            elif "revogado" in linha_lower:
+                                status = "Revogado"
+                            elif "cancelado" in linha_lower or "excluído" in linha_lower or "excluido" in linha_lower:
+                                status = "Cancelado"
 
-    # Buffer de linha para montar o contexto
-    for i, linha in enumerate(linhas):
-        linha_lower = linha.lower()
-        
-        nome_peca = None
-        if "mandado de prisão" in linha_lower or "mandado de prisao" in linha_lower:
-            nome_peca = "Mandado de Prisão"
-        elif "alvará" in linha_lower or "alvara" in linha_lower:
-            nome_peca = "Alvará de Soltura"
-        elif "contramandado" in linha_lower:
-            nome_peca = "Contramandado de Prisão"
+                            pecas.append({
+                                "nup": nup,
+                                "nome_peca": nome_peca,
+                                "status": status,
+                                "data_emissao": data_str
+                            })
+                            
+            # Fallback para linhas corridas de texto caso o PDF não tenha bordas de tabela
+            texto_pagina = page.extract_text()
+            if texto_pagina:
+                linhas = texto_pagina.split("\n")
+                for i, l in enumerate(linhas):
+                    l_lower = l.lower()
+                    nome_peca = None
+                    if "mandado de prisão" in l_lower or "mandado de prisao" in l_lower:
+                        nome_peca = "Mandado de Prisão"
+                    elif "alvará" in l_lower or "alvara" in l_lower:
+                        nome_peca = "Alvará de Soltura"
+                    elif "contramandado" in l_lower:
+                        nome_peca = "Contramandado de Prisão"
 
-        if nome_peca:
-            # Busca o NUP na própria linha ou nas 3 linhas vizinhas (para evitar perda por layout)
-            contexto = " ".join(linhas[max(0, i-2):min(len(linhas), i+3)])
-            nup_match = REGREX_NUP.search(contexto)
-            data_match = REGREX_DATA.search(contexto)
+                    if nome_peca:
+                        contexto = " ".join(linhas[max(0, i-2):min(len(linhas), i+3)])
+                        contexto_limpo = re.sub(r"\s+", " ", contexto)
+                        nup_match = REGREX_NUP.search(contexto_limpo)
+                        data_match = REGREX_DATA.search(contexto_limpo)
 
-            if nup_match:
-                nup = nup_match.group(0)
-                data_str = data_match.group(0) if data_match else "01/01/1900"
+                        if nup_match:
+                            nup = nup_match.group(0)
+                            data_str = data_match.group(0) if data_match else "01/01/1900"
+                            contexto_lower = contexto_limpo.lower()
+                            status = "Desconhecido"
+                            if "cumprido" in contexto_lower:
+                                status = "Cumprido"
+                            elif "pendente" in contexto_lower:
+                                status = "Pendente de Cumprimento"
+                            elif "baixado" in contexto_lower:
+                                status = "Baixado"
+                            elif "revogado" in contexto_lower:
+                                status = "Revogado"
 
-                # Identifica Status
-                status = "Desconhecido"
-                contexto_lower = contexto.lower()
-                if "cumprido" in contexto_lower:
-                    status = "Cumprido"
-                elif "pendente" in contexto_lower:
-                    status = "Pendente de Cumprimento"
-                elif "baixado" in contexto_lower:
-                    status = "Baixado"
-                elif "revogado" in contexto_lower:
-                    status = "Revogado"
-                elif "cancelado" in contexto_lower or "excluído" in contexto_lower or "excluido" in contexto_lower:
-                    status = "Cancelado"
+                            pecas.append({
+                                "nup": nup,
+                                "nome_peca": nome_peca,
+                                "status": status,
+                                "data_emissao": data_str
+                            })
 
-                pecas.append({
-                    "nup": nup,
-                    "nome_peca": nome_peca,
-                    "status": status,
-                    "data_emissao": data_str
-                })
-
-    # Remove duplicatas exatas de extração do buffer
+    # Remove duplicatas
     pecas_unicas = []
     for p in pecas:
         if p not in pecas_unicas:
             pecas_unicas.append(p)
-            
+
     return pecas_unicas
 
 # ------------------------------------------------------------------------------
@@ -111,18 +143,16 @@ def parse_data_br(data_str):
     except Exception:
         return datetime.date.min
 
-def analisar_impedimentos_v2_1(texto_seeu, texto_bnmp):
+def analisar_impedimentos_v2_1(file_seeu, file_bnmp):
     # ETAPA 2: MAPEAMENTO DA EXECUÇÃO (Lista de Exclusão Primária)
-    lista_exclusao = extrair_nups(texto_seeu)
+    lista_exclusao = extrair_texto_seeu(file_seeu)
 
     # ETAPA 1: PROCESSAMENTO E FILTRAGEM (BNMP)
-    pecas_bnmp = extrair_pecas_bnmp(texto_bnmp)
+    pecas_bnmp = extrair_pecas_bnmp(file_bnmp)
 
     mandados_analise = []
     for p in pecas_bnmp:
-        # 1. Filtro de Nome: Exclusivamente Mandado de Prisão
         if p["nome_peca"] == "Mandado de Prisão":
-            # 2. Filtro de Status: Retém apenas Cumprido ou Pendente de Cumprimento
             if p["status"] in ["Cumprido", "Pendente de Cumprimento"]:
                 mandados_analise.append(p)
 
@@ -134,7 +164,6 @@ def analisar_impedimentos_v2_1(texto_seeu, texto_bnmp):
 
         # REGRA DE OURO (FILTRO DE IDENTIDADE / BLOQUEIO DE FALSO POSITIVO)
         if nup_mandado in lista_exclusao:
-            # O mandado pertence à própria execução -> Desconsiderar sumariamente
             continue
 
         # ETAPA 3: ANÁLISE DE PROCESSO ESTRANHO (BUSCA DE CONTRA-PEÇA)
@@ -149,12 +178,10 @@ def analisar_impedimentos_v2_1(texto_seeu, texto_bnmp):
         motivo = "Mandado de Prisão identificado em processo que **NÃO** consta no Relatório de Execução e não possui contra-peça posterior."
 
         if contra_pecas:
-            # Pega a contra-peça mais recente
             contra_pecas.sort(key=lambda x: parse_data_br(x["data_emissao"]), reverse=True)
             data_contra = parse_data_br(contra_pecas[0]["data_emissao"])
 
             if data_contra > data_mandado:
-                # Contra-peça posterior ao mandado -> Sem restrição
                 continue
             elif data_contra == data_mandado:
                 status_final = "ANÁLISE MANUAL (BNMP 3.0)"
@@ -219,12 +246,8 @@ if st.button("Executar Análise Lógica v2.1", type="primary", use_container_wid
     else:
         with st.spinner("Analisando documentos via motor determinístico local..."):
             try:
-                # Extração e higienização de texto dos PDFs
-                texto_seeu = extrair_texto_pdf(file_seeu)
-                texto_bnmp = extrair_texto_pdf(file_bnmp)
-
                 # Análise Lógica V2.1
-                cenario, texto_final = analisar_impedimentos_v2_1(texto_seeu, texto_bnmp)
+                cenario, texto_final = analisar_impedimentos_v2_1(file_seeu, file_bnmp)
 
                 st.markdown("---")
                 if cenario == "Cenário A":
