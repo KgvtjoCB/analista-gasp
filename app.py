@@ -39,21 +39,21 @@ Para os mandados que **NÃO** pertencem à execução (NUPs estranhos ao relató
 ### FORMATO DO OUTPUT (OBRIGATÓRIO)
 
 **Cenário A: Nenhuma Restrição (Tudo sob controle da Execução)**
-Análise Detalhada: **Não foram encontradas restrições impeditivas.** Todos os mandados analisados referem-se aos processos já constantes na execução atual ou possuem baixa processual clara. (Falsos positivos de Número Único foram filtrados).
+> "Análise Detalhada: **Não foram encontradas restrições impeditivas.** Todos os mandados analisados referem-se aos processos já constantes na execução atual ou possuem baixa processual clara. (Falsos positivos de Número Único foram filtrados)."
 
 **Cenário B: Identificação de Pendências Reais (Processos Externos)**
-Análise Detalhada: **Foi encontrada uma restrição externa que impede a progressão/soltura.**
-
----
-### Detalhamento do Processo Nº [NUP Estranho à Execução]
-**Status da Análise:** [PROVÁVEL RESTRIÇÃO]
-
-**Motivo:** Mandado de Prisão identificado em processo que **NÃO** consta no Relatório de Execução e não possui contra-peça posterior.
-
-**Análise Cronológica:**
-* [Data] - [Mandado de Prisão] - [Status]
-
-**Ação Necessária:** Consultar processo de origem para verificar se a ordem de prisão ainda subsiste ou se houve omissão de baixa no BNMP.
+> "Análise Detalhada: **Foi encontrada uma restrição externa que impede a progressão/soltura.**
+>
+> ---
+> ### Detalhamento do Processo Nº [NUP Estranho à Execução]
+> **Status da Análise:** [PROVÁVEL RESTRIÇÃO]
+>
+> **Motivo:** Mandado de Prisão identificado em processo que **NÃO** consta no Relatório de Execução e não possui contra-peça posterior.
+>
+> **Análise Cronológica:**
+> * [Data] - [Mandado de Prisão] - [Status]
+>
+> **Ação Necessária:** Consultar processo de origem para verificar se a ordem de prisão ainda subsiste ou se houve omissão de baixa no BNMP."
 
 ---
 
@@ -105,7 +105,7 @@ def analisar_documentos_gemini(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
     
     # Instancia o modelo com a instrução do sistema travada
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
+        model_name="gemini-1.5-flash-latest",
         system_instruction=INSTRUCOES_SISTEMA,
         generation_config={"temperature": 0.0}
     )
@@ -165,9 +165,9 @@ if st.button("Executar Análise V2.1", type="primary", use_container_width=True)
                 
                 # Exibição visual condicionada ao resultado
                 if "Cenário A" in resultado or "Não foram encontradas restrições" in resultado:
-                    st.success(resultado.replace("Cenário A:", "").strip())
+                    st.success(resultado.replace("Cenário A:", "").replace("Cenário A", "").strip())
                 else:
-                    st.error(resultado.replace("Cenário B:", "").strip())
+                    st.error(resultado.replace("Cenário B:", "").replace("Cenário B", "").strip())
                     
             except Exception as e:
                 st.error(f"Erro durante a análise: {str(e)}")
