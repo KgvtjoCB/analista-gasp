@@ -15,7 +15,9 @@ st.set_page_config(
 )
 
 st.title("⚖️ Analista Jurídico (v2.1) — Filtro de Impedimentos")
-st.caption("Arquitetura Determinística Anti-Alucinação com Upload de PDF (SEEU & BNMP 3.0)")
+st.caption(
+    "Arquitetura Determinística Anti-Alucinação com Upload de PDF (SEEU & BNMP 3.0)"
+)
 
 # ------------------------------------------------------------------------------
 # GERENCIAMENTO SEGURO DA API KEY (SECRETS OU SIDEBAR)
@@ -31,56 +33,70 @@ with st.sidebar:
         st.success("🔑 API Key do Gemini carregada dos Secrets!")
     else:
         st.warning("⚠️ API Key não encontrada nos Secrets.")
-        api_key = st.text_input("Informe a Gemini API Key manualmente:", type="password")
-    
+        api_key = st.text_input(
+            "Informe a Gemini API Key manualmente:", type="password"
+        )
+
     st.markdown("---")
     st.info(
         "A IA realiza unicamente a leitura OCR do PDF e extração dos dados estruturados em JSON. "
         "Toda a lógica de bloqueio de falsos positivos roda no backend Python."
     )
 
+
 # ------------------------------------------------------------------------------
-# SCHEMAS DE EXTRAÇÃO ESTRUTURADA
+# SCHEMAS DE EXTRAÇÃO ESTRUTURADA (PYDANTIC)
 # ------------------------------------------------------------------------------
 class PecaBNMP(BaseModel):
     nup: str = Field(
-        description="NUP do processo associado à peça no formato CNJ NNNNNNN-DD.AAAA.J.TR.OOOO"
+        description="NUP do processo associado à peça mantendo a pontuação CNJ NNNNNNN-DD.AAAA.J.TR.OOOO"
     )
-    nome_peca: str = Field(description="Nome exato da peça")
-    status: str = Field(description="Status atual da peça (ex: Cumprido, Pendente de Cumprimento)")
-    data_emissao: str = Field(description="Data de emissão no formato YYYY-MM-DD")
+    nome_peca: str = Field(description="Nome exato da peça no extrato BNMP")
+    status: str = Field(
+        description="Status atual da peça (ex: Cumprido, Pendente de Cumprimento, Baixado, Revogado)"
+    )
+    data_emissao: str = Field(
+        description="Data de emissão da peça no formato YYYY-MM-DD"
+    )
 
 
 class ExtracaoProcessual(BaseModel):
-    nup_execucao_principal: str = Field(description="Número Único da Execução Penal")
-    nups_conhecimento: list[str] = Field(
-        description="Lista de NUPs dos processos de conhecimento/origem listados no relatório de execução"
+    nup_execucao_principal: str = Field(
+        description="Número Único da Execução Penal contido no relatório SEEU"
     )
-    pecas_bnmp: list[PecaBNMP] = Field(description="Lista de todas as peças encontradas no BNMP")
+    nups_conhecimento: list[str] = Field(
+        description="Lista de NUPs de todos os processos de conhecimento/origem listados no relatório de execução"
+    )
+    pecas_bnmp: list[PecaBNMP] = Field(
+        description="Lista de todas as peças identificadas no extrato do BNMP 3.0"
+    )
 
 
 # ------------------------------------------------------------------------------
-# EXTRAÇÃO VIA GEMINI API COM LEITURA DIRETA DE PDF (TEMPERATURE = 0.0)
+# EXTRAÇÃO VIA GEMINI API (MODELO OFICIAL GEMINI-2.0-FLASH + TEMP 0.0)
 # ------------------------------------------------------------------------------
 def extrair_dados_pdf(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
     client = genai.Client(api_key=api_key_val)
 
     prompt = """
     Sua única função é ler os dois documentos PDF anexados (Relatório do SEEU e Extrato do BNMP 3.0) 
-    e extrair os dados processuais informados preenchendo o esquema JSON estrito fornecido.
+    e extrair os dados processuais solicitados, preenchendo o esquema JSON estrito fornecido.
     
     Instruções de Extração:
-    1. Identifique o NUP principal da execução e todos os NUPs de conhecimento do SEEU.
+    1. Identifique o NUP principal da execução e todos os NUPs dos processos de conhecimento do SEEU.
     2. Identifique todas as peças do BNMP com seus respectivos NUPs, Nomes de Peça, Status e Datas de Emissão.
     3. Não deduza, não infira e não crie dados que não estejam visíveis nos PDFs.
     """
 
-    # Envia os arquivos PDF diretamente na requisição usando types.Part.from_bytes
-    part_seeu = types.Part.from_bytes(data=pdf_seeu_bytes, mime_type="application/pdf")
-    part_bnmp = types.Part.from_bytes(data=pdf_bnmp_bytes, mime_type="application/pdf")
+    part_seeu = types.Part.from_bytes(
+        data=pdf_seeu_bytes, mime_type="application/pdf"
+    )
+    part_bnmp = types.Part.from_bytes(
+        data=pdf_bnmp_bytes, mime_type="application/pdf"
+    )
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.0-flash",
         contents=[part_seeu, part_bnmp, prompt],
         config=types.GenerateContentConfig(
             temperature=0.0,
@@ -92,7 +108,7 @@ def extrair_dados_pdf(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
 
 
 # ------------------------------------------------------------------------------
-# MOTOR LÓGICO DETERMINÍSTICO (INSTRUÇÕES v2.1)
+# MOTOR LÓGICO DETERMINÍSTICO EM PYTHON (INSTRUÇÕES v2.1)
 # ------------------------------------------------------------------------------
 def converter_data(data_str: str):
     try:
@@ -102,6 +118,7 @@ def converter_data(data_str: str):
 
 
 def aplicar_regras_v2_1(dados):
+    # ETAPA 2: MAPEAMENTO DA EXECUÇÃO (Lista de Exclusão Primária)
     lista_exclusao = [dados.get("nup_execucao_principal", "").strip()]
     lista_exclusao.extend([n.strip() for n in dados.get("nups_conhecimento", [])])
     lista_exclusao = [n for n in lista_exclusao if n]
@@ -110,6 +127,7 @@ def aplicar_regras_v2_1(dados):
     mandados_analise = []
     restricoes_reais = []
 
+    # ETAPA 1: FILTRAGEM (Mandado de Prisão Cumprido ou Pendente)
     for p in pecas:
         nome = p.get("nome_peca", "").lower()
         status = p.get("status", "").lower()
@@ -117,13 +135,16 @@ def aplicar_regras_v2_1(dados):
             if status in ["cumprido", "pendente de cumprimento", "pendente"]:
                 mandados_analise.append(p)
 
+    # ETAPAS 2 E 3: ANÁLISE LÓGICA
     for mandado in mandados_analise:
         nup_mandado = mandado.get("nup", "").strip()
         data_mandado = converter_data(mandado.get("data_emissao", ""))
 
+        # REGRA DE OURO (FILTRO DE IDENTIDADE / BLOQUEIO DE FALSO POSITIVO)
         if nup_mandado in lista_exclusao:
             continue
 
+        # ETAPA 3: ANÁLISE DE PROCESSO ESTRANHO (VERIFICAÇÃO DE CONTRA-PEÇA)
         contra_pecas = [
             p
             for p in pecas
@@ -139,7 +160,8 @@ def aplicar_regras_v2_1(dados):
 
         if contra_pecas:
             contra_pecas.sort(
-                key=lambda x: converter_data(x.get("data_emissao", "")), reverse=True
+                key=lambda x: converter_data(x.get("data_emissao", "")),
+                reverse=True,
             )
             data_contra = converter_data(contra_pecas[0].get("data_emissao", ""))
 
@@ -159,6 +181,7 @@ def aplicar_regras_v2_1(dados):
             }
         )
 
+    # FORMATO DO OUTPUT OBRIGATÓRIO (CENÁRIO A vs CENÁRIO B)
     if not restricoes_reais:
         return (
             "Cenário A",
@@ -205,23 +228,27 @@ with col2:
 
 if st.button("Executar Análise Lógica v2.1", type="primary", use_container_width=True):
     if not api_key:
-        st.error("Chave da API do Gemini não configurada.")
+        st.error(
+            "Chave da API do Gemini não configurada. Configure no Secrets do Streamlit Cloud ou informe na barra lateral."
+        )
     elif not file_seeu or not file_bnmp:
-        st.warning("Envie os dois arquivos PDF (SEEU e BNMP) para iniciar a análise.")
+        st.warning(
+            "Envie ambos os arquivos PDF (SEEU e BNMP) para iniciar a análise."
+        )
     else:
-        with st.spinner("Processando PDFs com Gemini e aplicando regras v2.1..."):
+        with st.spinner("Analisando PDFs com Gemini e aplicando Regras v2.1..."):
             try:
-                # Obtém os bytes dos arquivos anexados
                 seeu_bytes = file_seeu.read()
                 bnmp_bytes = file_bnmp.read()
 
-                # Extrai dados via Gemini API
+                # Extração via IA
                 dados_json = extrair_dados_pdf(seeu_bytes, bnmp_bytes, api_key)
 
-                with st.expander("🛠️ Ver Dados Estruturados (Auditoria)"):
+                # Auditoria visual
+                with st.expander("🛠️ Ver Dados Estruturados (Auditoria de Extração)"):
                     st.json(dados_json)
 
-                # Processa regras no backend Python
+                # Validação lógica via Python
                 cenario, texto_final = aplicar_regras_v2_1(dados_json)
 
                 st.markdown("---")
