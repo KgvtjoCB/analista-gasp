@@ -1,5 +1,6 @@
 import datetime
 import json
+import time
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -73,7 +74,7 @@ class ExtracaoProcessual(BaseModel):
 
 
 # ------------------------------------------------------------------------------
-# EXTRAÇÃO VIA GEMINI API (MODELO OFICIAL GEMINI-2.0-FLASH + TEMP 0.0)
+# EXTRAÇÃO VIA GEMINI API (MODELO GEMINI-1.5-FLASH + FALLBACK AUTOMÁTICO)
 # ------------------------------------------------------------------------------
 def extrair_dados_pdf(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
     client = genai.Client(api_key=api_key_val)
@@ -95,16 +96,36 @@ def extrair_dados_pdf(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
         data=pdf_bnmp_bytes, mime_type="application/pdf"
     )
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[part_seeu, part_bnmp, prompt],
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            response_mime_type="application/json",
-            response_schema=ExtracaoProcessual,
-        ),
+    configuracao = types.GenerateContentConfig(
+        temperature=0.0,
+        response_mime_type="application/json",
+        response_schema=ExtracaoProcessual,
     )
-    return json.loads(response.text)
+
+    # Utiliza o gemini-1.5-flash como modelo principal (cota gratuita estável)
+    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
+
+    for modelo in modelos:
+        try:
+            response = client.models.generate_content(
+                model=modelo,
+                contents=[part_seeu, part_bnmp, prompt],
+                config=configuracao,
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            erro_str = str(e)
+            if "429" in erro_str or "RESOURCE_EXHAUSTED" in erro_str:
+                if modelo != modelos[-1]:
+                    time.sleep(2)
+                    continue
+                else:
+                    raise Exception(
+                        "⚠️ Limite temporário da API gratuita atingido. "
+                        "Aguarde cerca de 30 a 50 segundos e clique em Executar novamente."
+                    )
+            else:
+                raise e
 
 
 # ------------------------------------------------------------------------------
