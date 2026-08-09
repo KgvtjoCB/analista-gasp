@@ -88,7 +88,7 @@ def extrair_texto_pdf(file_bytes):
 
 
 # ------------------------------------------------------------------------------
-# EXTRAÇÃO VIA GEMINI API (MODELO OFICIAL COM FALLBACK E ESTRUTURAÇÃO ENFORCADA)
+# EXTRAÇÃO VIA GEMINI API (MODELO OFICIAL COM FALLBACK E ESTRUTURAÇÃO)
 # ------------------------------------------------------------------------------
 def extrair_dados_com_gemini(texto_seeu, texto_bnmp, api_key_val):
     client = genai.Client(api_key=api_key_val)
@@ -119,8 +119,8 @@ def extrair_dados_com_gemini(texto_seeu, texto_bnmp, api_key_val):
         response_schema=ExtracaoProcessual,
     )
 
-    # Nomes oficiais suportados pelo SDK novo google-genai
-    modelos = ["gemini-2.0-flash", "gemini-2.5-flash"]
+    # CORREÇÃO: Nomes oficiais suportados pelo Google AI Studio
+    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
 
     for modelo in modelos:
         try:
@@ -138,7 +138,7 @@ def extrair_dados_com_gemini(texto_seeu, texto_bnmp, api_key_val):
                     continue
                 else:
                     raise Exception(
-                        f"Erro na comunicação com a API do Gemini: {erro_str}"
+                        f"Erro na comunicação com a API do Gemini. Cota esgotada. Tente novamente em alguns segundos."
                     )
             else:
                 raise e
