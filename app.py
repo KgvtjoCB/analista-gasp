@@ -1,11 +1,7 @@
 import datetime
-import json
-import time
+import re
 import pypdf
 import streamlit as st
-from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field
 
 # ------------------------------------------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA
@@ -17,66 +13,15 @@ st.set_page_config(
 )
 
 st.title("⚖️ Analista Jurídico (v2.1) — Filtro de Impedimentos")
-st.caption(
-    "Arquitetura Determinística Anti-Alucinação com Leitura Nativa de PDF (SEEU & BNMP 3.0)"
-)
+st.caption("Motor Lógico Puramente Determinístico (Sem dependência de API Externa)")
 
 # ------------------------------------------------------------------------------
-# GERENCIAMENTO SEGURO DA API KEY (SECRETS OU SIDEBAR)
+# EXTRAÇÃO DE TEXTO E REGEX PARA NUPS E PEÇAS
 # ------------------------------------------------------------------------------
-api_key = None
-
-if "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
-
-with st.sidebar:
-    st.header("Status do Sistema")
-    if api_key:
-        st.success("🔑 API Key do Gemini carregada dos Secrets!")
-    else:
-        st.warning("⚠️ API Key não encontrada nos Secrets.")
-        api_key = st.text_input(
-            "Informe a Gemini API Key manualmente:", type="password"
-        )
-
-    st.markdown("---")
-    st.info(
-        "O texto dos PDFs é extraído localmente e enviado para o Gemini apenas para "
-        "estruturação de dados em JSON. A análise do Cenário A/B roda em Python."
-    )
+REGREX_NUP = re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b")
+REGREX_DATA = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 
 
-# ------------------------------------------------------------------------------
-# SCHEMAS DE EXTRAÇÃO ESTRUTURADA (PYDANTIC)
-# ------------------------------------------------------------------------------
-class PecaBNMP(BaseModel):
-    nup: str = Field(
-        description="NUP do processo associado à peça mantendo a pontuação CNJ NNNNNNN-DD.AAAA.J.TR.OOOO"
-    )
-    nome_peca: str = Field(description="Nome exato da peça no extrato BNMP")
-    status: str = Field(
-        description="Status atual da peça (ex: Cumprido, Pendente de Cumprimento, Baixado, Revogado)"
-    )
-    data_emissao: str = Field(
-        description="Data de emissão da peça no formato YYYY-MM-DD"
-    )
-
-
-class ExtracaoProcessual(BaseModel):
-    nup_execucao_principal: str = Field(
-        description="Número Único da Execução Penal contido no relatório SEEU"
-    )
-    nups_conhecimento: list[str] = Field(
-        description="Lista de NUPs de todos os processos de conhecimento/origem listados no relatório de execução"
-    )
-    pecas_bnmp: list[PecaBNMP] = Field(
-        description="Lista de todas as peças identificadas no extrato do BNMP 3.0"
-    )
-
-
-# ------------------------------------------------------------------------------
-# EXTRAÇÃO DE TEXTO DOS PDFS (LOCAL E RÁPIDA VIA PYPDF)
-# ------------------------------------------------------------------------------
 def extrair_texto_pdf(file_bytes):
     reader = pypdf.PdfReader(file_bytes)
     texto = ""
@@ -87,122 +32,113 @@ def extrair_texto_pdf(file_bytes):
     return texto
 
 
-# ------------------------------------------------------------------------------
-# EXTRAÇÃO VIA GEMINI API (MODELO OFICIAL COM FALLBACK E ESTRUTURAÇÃO)
-# ------------------------------------------------------------------------------
-def extrair_dados_com_gemini(texto_seeu, texto_bnmp, api_key_val):
-    client = genai.Client(api_key=api_key_val)
+def extrair_nups(texto):
+    """Extrai todos os NUPs únicos no padrão CNJ mantendo a pontuação."""
+    return list(set(REGREX_NUP.findall(texto)))
 
-    prompt = f"""
-    Sua única função é ler os textos extraídos dos documentos (Relatório do SEEU e Extrato do BNMP 3.0) 
-    e extrair os dados processuais solicitados, preenchendo o esquema JSON estrito fornecido.
-    
-    Instruções de Extração:
-    1. Identifique o NUP principal da execução e todos os NUPs dos processos de conhecimento/origem do SEEU.
-    2. Identifique todas as peças do BNMP com seus respectivos NUPs, Nomes de Peça, Status e Datas de Emissão.
-    3. Não deduza, não infira e não crie dados que não estejam visíveis no texto.
-    
-    TEXTO RELATÓRIO SEEU:
-    ---
-    {texto_seeu}
-    ---
-    
-    TEXTO EXTRATO BNMP 3.0:
-    ---
-    {texto_bnmp}
-    ---
+
+def extrair_pecas_bnmp(texto_bnmp):
     """
+    Variação de parser para extrair registros do BNMP 3.0 via linhas de texto.
+    Procura por blocos de Mandados de Prisão, Alvarás e Contramandados.
+    """
+    linhas = texto_bnmp.split("\n")
+    pecas = []
 
-    configuracao = types.GenerateContentConfig(
-        temperature=0.0,
-        response_mime_type="application/json",
-        response_schema=ExtracaoProcessual,
-    )
+    for i, linha in enumerate(linhas):
+        nup_match = REGREX_NUP.search(linha)
+        data_match = REGREX_DATA.search(linha)
 
-    # CORREÇÃO: Nomes oficiais suportados pelo Google AI Studio
-    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
+        # Mapeamento do tipo de peça
+        linha_lower = linha.lower()
+        nome_peca = None
 
-    for modelo in modelos:
-        try:
-            response = client.models.generate_content(
-                model=modelo,
-                contents=prompt,
-                config=configuracao,
+        if "mandado de prisão" in linha_lower or "mandado de prisao" in linha_lower:
+            nome_peca = "Mandado de Prisão"
+        elif "alvará" in linha_lower or "alvara" in linha_lower:
+            nome_peca = "Alvará de Soltura"
+        elif "contramandado" in linha_lower:
+            nome_peca = "Contramandado de Prisão"
+
+        if nome_peca and nup_match:
+            nup = nup_match.group(0)
+            data_str = data_match.group(0) if data_match else "01/01/1900"
+
+            # Identifica status
+            status = "Pendente de Cumprimento"
+            if "cumprido" in linha_lower:
+                status = "Cumprido"
+            elif "baixado" in linha_lower or "revogado" in linha_lower:
+                status = "Baixado"
+
+            pecas.append(
+                {
+                    "nup": nup,
+                    "nome_peca": nome_peca,
+                    "status": status,
+                    "data_emissao": data_str,
+                }
             )
-            return json.loads(response.text)
-        except Exception as e:
-            erro_str = str(e)
-            if "429" in erro_str or "404" in erro_str or "RESOURCE_EXHAUSTED" in erro_str:
-                if modelo != modelos[-1]:
-                    time.sleep(1)
-                    continue
-                else:
-                    raise Exception(
-                        f"Erro na comunicação com a API do Gemini. Cota esgotada. Tente novamente em alguns segundos."
-                    )
-            else:
-                raise e
+
+    return pecas
 
 
 # ------------------------------------------------------------------------------
-# MOTOR LÓGICO DETERMINÍSTICO EM PYTHON (INSTRUÇÕES v2.1)
+# MOTOR LÓGICO DAS INSTRUÇÕES V2.1 (CONFORME ESPECIFICAÇÃO)
 # ------------------------------------------------------------------------------
-def converter_data(data_str: str):
+def parse_data_br(data_str):
     try:
-        return datetime.datetime.strptime(data_str.strip(), "%Y-%m-%d").date()
+        return datetime.datetime.strptime(data_str.strip(), "%d/%m/%Y").date()
     except Exception:
         return datetime.date.min
 
 
-def aplicar_regras_v2_1(dados):
+def analisar_impedimentos_v2_1(texto_seeu, texto_bnmp):
     # ETAPA 2: MAPEAMENTO DA EXECUÇÃO (Lista de Exclusão Primária)
-    lista_exclusao = [dados.get("nup_execucao_principal", "").strip()]
-    lista_exclusao.extend([n.strip() for n in dados.get("nups_conhecimento", [])])
-    lista_exclusao = [n for n in lista_exclusao if n]
+    lista_exclusao = extrair_nups(texto_seeu)
 
-    pecas = dados.get("pecas_bnmp", [])
+    # ETAPA 1: PROCESSAMENTO E FILTRAGEM (BNMP)
+    pecas_bnmp = extrair_pecas_bnmp(texto_bnmp)
+
     mandados_analise = []
-    restricoes_reais = []
-
-    # ETAPA 1: FILTRAGEM (Mandado de Prisão Cumprido ou Pendente)
-    for p in pecas:
-        nome = p.get("nome_peca", "").lower()
-        status = p.get("status", "").lower()
-        if "mandado de prisão" in nome or "mandado de prisao" in nome:
-            if status in ["cumprido", "pendente de cumprimento", "pendente"]:
+    for p in pecas_bnmp:
+        if p["nome_peca"] == "Mandado de Prisão":
+            # Filtro de Status: Apenas Cumprido ou Pendente
+            if p["status"] in ["Cumprido", "Pendente de Cumprimento"]:
                 mandados_analise.append(p)
 
-    # ETAPAS 2 E 3: ANÁLISE LÓGICA
+    restricoes_reais = []
+
+    # ETAPAS 2 E 3: ANÁLISE LÓGICA E VEREDITO
     for mandado in mandados_analise:
-        nup_mandado = mandado.get("nup", "").strip()
-        data_mandado = converter_data(mandado.get("data_emissao", ""))
+        nup_mandado = mandado["nup"].strip()
 
         # REGRA DE OURO (FILTRO DE IDENTIDADE / BLOQUEIO DE FALSO POSITIVO)
         if nup_mandado in lista_exclusao:
+            # Mandado pertence à própria execução -> IGNORAR SUMARIAMENTE
             continue
 
-        # ETAPA 3: ANÁLISE DE PROCESSO ESTRANHO (VERIFICAÇÃO DE CONTRA-PEÇA)
+        # ETAPA 3: PROCESSO ESTRANHO À EXECUÇÃO (VERIFICAÇÃO DE CONTRA-PEÇA)
         contra_pecas = [
             p
-            for p in pecas
-            if p.get("nup", "").strip() == nup_mandado
-            and any(
-                cp in p.get("nome_peca", "").lower()
-                for cp in ["alvará", "alvara", "contramandado"]
-            )
+            for p in pecas_bnmp
+            if p["nup"].strip() == nup_mandado
+            and p["nome_peca"] in ["Alvará de Soltura", "Contramandado de Prisão"]
         ]
 
+        data_mandado = parse_data_br(mandado["data_emissao"])
         status_final = "PROVÁVEL RESTRIÇÃO"
         motivo = "Mandado de Prisão identificado em processo que **NÃO** consta no Relatório de Execução e não possui contra-peça posterior."
 
         if contra_pecas:
+            # Pega a contra-peça mais recente
             contra_pecas.sort(
-                key=lambda x: converter_data(x.get("data_emissao", "")),
-                reverse=True,
+                key=lambda x: parse_data_br(x["data_emissao"]), reverse=True
             )
-            data_contra = converter_data(contra_pecas[0].get("data_emissao", ""))
+            data_contra = parse_data_br(contra_pecas[0]["data_emissao"])
 
             if data_contra > data_mandado:
+                # Contra-peça posterior liberou o processo externo
                 continue
             elif data_contra == data_mandado:
                 status_final = "ANÁLISE MANUAL (BNMP 3.0)"
@@ -213,12 +149,12 @@ def aplicar_regras_v2_1(dados):
                 "nup": nup_mandado,
                 "status": status_final,
                 "motivo": motivo,
-                "data_mandado": mandado.get("data_emissao"),
-                "status_mandado": mandado.get("status"),
+                "data_mandado": mandado["data_emissao"],
+                "status_mandado": mandado["status"],
             }
         )
 
-    # FORMATO DO OUTPUT OBRIGATÓRIO (CENÁRIO A vs CENÁRIO B)
+    # OUTPUT EXATAMENTE CONFORME FORMATO OBRIGATÓRIO V2.1
     if not restricoes_reais:
         return (
             "Cenário A",
@@ -228,22 +164,23 @@ def aplicar_regras_v2_1(dados):
         )
     else:
         r = restricoes_reais[0]
-        texto = (
-            "Análise Detalhada: **Foi encontrada uma restrição externa que impede a progressão/soltura.**\n\n"
-            "---\n"
-            f"### Detalhamento do Processo Nº {r['nup']}\n"
-            f"**Status da Análise:** [{r['status']}]\n\n"
-            f"**Motivo:** {r['motivo']}\n\n"
-            "**Análise Cronológica:**\n"
-            f"* {r['data_mandado']} - Mandado de Prisão - {r['status_mandado']}\n\n"
-            "**Ação Necessária:** Consultar processo de origem para verificar se a ordem de prisão "
-            "ainda subsiste ou se houve omissão de baixa no BNMP."
-        )
-        return "Cenário B", texto
+        texto_cenario_b = f"""Análise Detalhada: **Foi encontrada uma restrição externa que impede a progressão/soltura.**
+
+---
+### Detalhamento do Processo Nº {r['nup']}
+**Status da Análise:** [{r['status']}]
+
+**Motivo:** {r['motivo']}
+
+**Análise Cronológica:**
+* {r['data_mandado']} - Mandado de Prisão - {r['status_mandado']}
+
+**Ação Necessária:** Consultar processo de origem para verificar se a ordem de prisão ainda subsiste ou se houve omissão de baixa no BNMP."""
+        return "Cenário B", texto_cenario_b
 
 
 # ------------------------------------------------------------------------------
-# INTERFACE GRÁFICA (UPLOAD DE ARQUIVOS PDF)
+# INTERFACE GRÁFICA
 # ------------------------------------------------------------------------------
 col1, col2 = st.columns(2)
 
@@ -264,32 +201,21 @@ with col2:
     )
 
 if st.button("Executar Análise Lógica v2.1", type="primary", use_container_width=True):
-    if not api_key:
-        st.error(
-            "Chave da API do Gemini não configurada. Configure no Secrets do Streamlit Cloud ou informe na barra lateral."
-        )
-    elif not file_seeu or not file_bnmp:
+    if not file_seeu or not file_bnmp:
         st.warning(
             "Envie ambos os arquivos PDF (SEEU e BNMP) para iniciar a análise."
         )
     else:
-        with st.spinner("Processando PDFs e realizando análise lógica v2.1..."):
+        with st.spinner("Analisando documentos via motor determinístico local..."):
             try:
-                # 1. Extração local de texto via Python
+                # Extração de texto dos PDFs
                 texto_seeu = extrair_texto_pdf(file_seeu)
                 texto_bnmp = extrair_texto_pdf(file_bnmp)
 
-                # 2. IA extrai os dados estruturados em JSON
-                dados_json = extrair_dados_com_gemini(
-                    texto_seeu, texto_bnmp, api_key
+                # Análise Lógica V2.1
+                cenario, texto_final = analisar_impedimentos_v2_1(
+                    texto_seeu, texto_bnmp
                 )
-
-                # Auditoria visual
-                with st.expander("🛠️ Ver Dados Estruturados (Auditoria de Extração)"):
-                    st.json(dados_json)
-
-                # 3. Validação lógica determinística em Python
-                cenario, texto_final = aplicar_regras_v2_1(dados_json)
 
                 st.markdown("---")
                 if cenario == "Cenário A":
