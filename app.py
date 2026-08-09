@@ -1,6 +1,5 @@
 import streamlit as st
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 # ------------------------------------------------------------------------------
 # INSTRUÇÕES DO SISTEMA (VERSÃO 2.1)
@@ -73,7 +72,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ Analista Jurídico (v2.1) — Filtro de Impedimentos")
-st.caption("Leitura Multimodal e Análise Semântica (Gemini API)")
+st.caption("Leitura Multimodal e Análise Semântica (SDK Estável)")
 
 # ------------------------------------------------------------------------------
 # GERENCIAMENTO DA API KEY
@@ -93,20 +92,33 @@ with st.sidebar:
     
     st.markdown("---")
     st.info(
-        "Esta versão utiliza a leitura visual e estrutural nativa do Gemini, "
-        "imunizando o sistema contra quebras de tabela e formatações irregulares "
-        "dos PDFs do BNMP 3.0."
+        "Utilizando o SDK estável (`google-generativeai`) para leitura visual nativa. "
+        "Imune a quebras de tabela e erros de roteamento de API."
     )
 
 # ------------------------------------------------------------------------------
-# MOTOR DE ANÁLISE MULTIMODAL
+# MOTOR DE ANÁLISE MULTIMODAL (SDK ESTÁVEL)
 # ------------------------------------------------------------------------------
 def analisar_documentos_gemini(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
-    client = genai.Client(api_key=api_key_val)
+    # Configura a chave na biblioteca clássica
+    genai.configure(api_key=api_key_val)
     
-    # Prepara os documentos para o modelo ler nativamente
-    part_seeu = types.Part.from_bytes(data=pdf_seeu_bytes, mime_type="application/pdf")
-    part_bnmp = types.Part.from_bytes(data=pdf_bnmp_bytes, mime_type="application/pdf")
+    # Instancia o modelo com a instrução do sistema travada
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=INSTRUCOES_SISTEMA,
+        generation_config={"temperature": 0.0}
+    )
+    
+    # Prepara os PDFs como blobs de dados nativos
+    doc_seeu = {
+        "mime_type": "application/pdf",
+        "data": pdf_seeu_bytes
+    }
+    doc_bnmp = {
+        "mime_type": "application/pdf",
+        "data": pdf_bnmp_bytes
+    }
     
     prompt_usuario = (
         "Leia os dois documentos PDF anexados (SEEU e BNMP). Aplique estritamente as diretrizes "
@@ -114,29 +126,12 @@ def analisar_documentos_gemini(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
         "como Cenário A ou Cenário B. Não adicione nenhuma saudação, conclusão ou texto extra."
     )
     
-    configuracao = types.GenerateContentConfig(
-        system_instruction=INSTRUCOES_SISTEMA,
-        temperature=0.0, # Zero alucinação, 100% determinístico
-    )
-    
-    # Utilizando o 1.5-flash pela velocidade e cota gratuita generosa
-    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
-    
-    for modelo in modelos:
-        try:
-            response = client.models.generate_content(
-                model=modelo,
-                contents=[part_seeu, part_bnmp, prompt_usuario],
-                config=configuracao,
-            )
-            return response.text
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                if modelo != modelos[-1]:
-                    continue # Tenta o modelo de fallback
-                else:
-                    raise Exception("Cota temporária excedida. Aguarde alguns segundos.")
-            raise e
+    try:
+        response = model.generate_content([doc_seeu, doc_bnmp, prompt_usuario])
+        return response.text
+    except Exception as e:
+        raise Exception(f"Erro de comunicação com a API: {str(e)}")
+
 
 # ------------------------------------------------------------------------------
 # INTERFACE GRÁFICA
