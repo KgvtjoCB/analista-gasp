@@ -48,7 +48,7 @@ Para os mandados que **NÃO** pertencem à execução (NUPs estranhos ao relató
 > ### Detalhamento do Processo Nº [NUP Estranho à Execução]
 > **Status da Análise:** [PROVÁVEL RESTRIÇÃO]
 >
-> **Motivo:** Mandado de Prisão identificado em processo que **NÃO** consta no Relatório de Execução e não possui contra-peça posterior.
+> **Motivo:** Mandado de Prisão identified em processo que **NÃO** consta no Relatório de Execução e não possui contra-peça posterior.
 >
 > **Análise Cronológica:**
 > * [Data] - [Mandado de Prisão] - [Status]
@@ -100,15 +100,7 @@ with st.sidebar:
 # MOTOR DE ANÁLISE MULTIMODAL (SDK ESTÁVEL)
 # ------------------------------------------------------------------------------
 def analisar_documentos_gemini(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
-    # Configura a chave na biblioteca clássica
     genai.configure(api_key=api_key_val)
-    
-    # Instancia o modelo com a instrução do sistema travada
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash-latest",
-        system_instruction=INSTRUCOES_SISTEMA,
-        generation_config={"temperature": 0.0}
-    )
     
     # Prepara os PDFs como blobs de dados nativos
     doc_seeu = {
@@ -125,12 +117,25 @@ def analisar_documentos_gemini(pdf_seeu_bytes, pdf_bnmp_bytes, api_key_val):
         "passadas nas Instruções de Sistema e me devolva EXATAMENTE o texto de output formatado "
         "como Cenário A ou Cenário B. Não adicione nenhuma saudação, conclusão ou texto extra."
     )
+
+    # Nomes oficiais suportados
+    modelos = ["gemini-1.5-flash", "gemini-2.0-flash"]
     
-    try:
-        response = model.generate_content([doc_seeu, doc_bnmp, prompt_usuario])
-        return response.text
-    except Exception as e:
-        raise Exception(f"Erro de comunicação com a API: {str(e)}")
+    ultimo_erro = None
+    for modelo_nome in modelos:
+        try:
+            model = genai.GenerativeModel(
+                model_name=modelo_nome,
+                system_instruction=INSTRUCOES_SISTEMA,
+                generation_config={"temperature": 0.0}
+            )
+            response = model.generate_content([doc_seeu, doc_bnmp, prompt_usuario])
+            return response.text
+        except Exception as e:
+            ultimo_erro = e
+            continue
+            
+    raise Exception(f"Erro de comunicação com a API: {str(ultimo_erro)}")
 
 
 # ------------------------------------------------------------------------------
